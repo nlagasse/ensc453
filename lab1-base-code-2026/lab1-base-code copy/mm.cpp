@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include "my_timer.h"
 
+#include <omp.h>
+
 #define NI 2048
 #define NJ 2048
 #define NK 2048
@@ -63,6 +65,8 @@ void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, fl
 //A is NIxNK
 //B is NKxNJ
 //C is NIxNJ
+omp_set_num_threads(2);
+#pragma omp parallel for private (j)
   for (i = 0; i < NI; i++) {
     for (j = 0; j < NJ; j++) {
       C[i*NJ+j] *= beta;
