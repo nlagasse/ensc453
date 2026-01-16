@@ -65,15 +65,18 @@ void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, fl
 //A is NIxNK
 //B is NKxNJ
 //C is NIxNJ
-omp_set_num_threads(2);
-#pragma omp parallel for private (j)
+
+omp_set_num_threads(20);
+#pragma omp parallel for private (j) // outer
   for (i = 0; i < NI; i++) {
+    // #pragma omp parallel for // inner
     for (j = 0; j < NJ; j++) {
       C[i*NJ+j] *= beta;
     }
+    // #pragma omp parallel for private (k) // inner
     for (j = 0; j < NJ; j++) {
       for (k = 0; k < NK; ++k) {
-	C[i*NJ+j] += alpha * A[i*NK+k] * B[k*NJ+j];
+	      C[i*NJ+j] += alpha * A[i*NK+k] * B[k*NJ+j];
       }
     }
   }
