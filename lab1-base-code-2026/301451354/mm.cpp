@@ -59,24 +59,38 @@ void print_array_sum(float C[NI*NJ])
 static
 void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
 {
-  int i, j, k;
+  int i, j, k, ii, jj, kk;
 
 // => Form C := alpha*A*B + beta*C,
 //A is NIxNK
 //B is NKxNJ
 //C is NIxNJ
 
-omp_set_num_threads(20);
-#pragma omp parallel for private (j) // outer
-  for (i = 0; i < NI; i++) {
-    // #pragma omp parallel for // inner
-    for (j = 0; j < NJ; j++) {
-      C[i*NJ+j] *= beta;
-    }
-    // #pragma omp parallel for private (k) // inner
-    for (j = 0; j < NJ; j++) {
-      for (k = 0; k < NK; ++k) {
-	      C[i*NJ+j] += alpha * A[i*NK+k] * B[k*NJ+j];
+// printf("number of devices = %d\n", omp_get_max_threads());
+
+// Tiling
+int TILE_SIZE = 16;
+
+omp_set_num_threads(6);
+#pragma omp parallel for private (j)
+  for (i = 0; i < NI; i+=TILE_SIZE) {
+    // J
+    for (j = 0; j < NJ; j+=TILE_SIZE) {
+      // I
+      for(int row = i; row < TILE_SIZE +i; row++){
+        for(int col = j; col < TILE_SIZE +j; col++){
+          C[row*NJ+col] *= beta;
+        }
+      }
+      // K 
+      for(k = 0; k< NK; k+= TILE_SIZE){
+        for (ii=i; ii< TILE_SIZE+i && ii<NI; ii++){
+          for (jj=j; jj< TILE_SIZE+j && jj<NJ; jj++){              
+            for (kk=k; kk< TILE_SIZE+k && kk<NK; kk++){ 
+              C[ii*NJ+jj] += alpha * A[ii*NK+kk] * B[kk*NJ+jj];
+            }
+          }
+        }
       }
     }
   }
