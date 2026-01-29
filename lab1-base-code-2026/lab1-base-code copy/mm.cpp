@@ -4,9 +4,9 @@
 
 #include <omp.h>
 
-#define NI 2048
-#define NJ 2048
-#define NK 2048
+#define NI 4096
+#define NJ 4096
+#define NK 4096
 
 /* Array initialization. */
 static

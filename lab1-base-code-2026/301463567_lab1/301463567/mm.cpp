@@ -1,7 +1,11 @@
-#include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "my_timer.h"
+
+#include <x86intrin.h>
+#include <omp.h>
+#include <math.h> 
+
 
 #define NI 4096
 #define NJ 4096
@@ -52,69 +56,117 @@ void print_array_sum(float C[NI*NJ])
   printf("sum of C array = %f\n", sum);
 }
 
-
-/* Main computational kernel. The whole function will be timed,
-   including the call and return. */
+/* Main computational kernel: with tiling, simd, and parallelization optimizations. */
 static
-void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta, int num_threads)
+__attribute__((target("avx2")))
+void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
 {
+  int i, j, k, ii, jj, kk;
 
-/*===========================GENERAL COMMENTS======================================*/
-//pragma omp parrallel for private(variable) <-- makes a certain variable "private", and it wont be treated as shared memory. 
-//NOTE: any variables defined BEFORE the #pragma statement is read as a SHARED variable
-//once a variable is privatized, it is UNDEFINED until you give it a value
-//pragma omp master --> only the master thread works
-//pragma omp single nowait --> idle threads do not have to join with working threads after task finishes
-/*=================================================================================*/
-
-/*===========================OPTIMIZATION COMMENTS=================================*/
-//parallelizing the outer loop (i loop) is the most efficient way to parallelize this
-//because each iteration of the i loop is independent of each other (no data dependency)
-//so there is no need for synchronization between threads
-//private(i,j,k) makes i,j,k private variables for each thread
-//num_threads(num_threads) sets the number of threads to use
-/*=================================================================================*/
-
-/*===========================TILING COMMENTS=======================================*/
-int tile_size = 32; 
-/*=================================================================================*/
-
-
-int i, j, k;
 // => Form C := alpha*A*B + beta*C,
 //A is NIxNK
 //B is NKxNJ
 //C is NIxNJ
-#pragma omp parallel num_threads(num_threads) private (i,j,k)
-{
-  #pragma omp for 
-  for (int i = 0; i < NI/tile_size; i++) {
-      // for (int j = 0; j < NJ/tile_size; j++) {
-      //     for (int ii = 0; ii < tile_size; ii++) {
-      //         for (int jj = 0; jj < tile_size; jj++) {
-      //             C[(i*tile_size+ii)*NJ+(j*tile_size+jj)] *= beta;
-      //         }
-      //     }
-      //     for (int k = 0; k < NK; k++) {
-      //         for (int ii = 0; ii < tile_size; ii++) {
-      //             for (int jj = 0; jj < tile_size; jj++) {
-      //                 C[(i*tile_size+ii)*NJ+(j*tile_size+jj)] += alpha * A[(i*tile_size+ii)*NK+k] * B[k*NJ+(j*tile_size+jj)];
-      //             }
-      //         }
-      //     }
-      // }
+  const int tileSize = 256;
+  __m256 alphaV = _mm256_set1_ps(alpha);
+  __m256 betaV = _mm256_set1_ps(beta);
 
+  omp_set_num_threads(18);
+  #pragma omp parallel for collapse(2)
+  for(i = 0; i < NI; i += tileSize){
+    for(j = 0; j < NJ; j += tileSize){
+      for(ii = i; ii < i+tileSize && ii < NI; ii++){
+        for(jj = j; jj < j+tileSize && jj < NJ; jj+=8){
 
-      for (int j = 0; j < NJ/tile_size; j++) {
-        for (int ii )
-          C[i*NJ+j] *= beta;
-          for (int k = 0; k < NK; k++) {
-              C[i*NJ+j] += alpha * A[i*NK+k] * B[k*NJ+j];
-          }
+          //multiplying by BETA here: 
+          __m256 cV = _mm256_loadu_ps(&C[(ii << 12) + jj]);
+          cV = _mm256_mul_ps(cV, _mm256_set1_ps(2.5f));
+          _mm256_storeu_ps(&C[((ii+0)<<12) + jj], cV);
+        }
       }
+      for(k = 0; k < NK; k += tileSize){
+        for(ii = i; ii < i+tileSize && ii < NI; ii+=4){
+          for(jj = j; jj < j+tileSize && jj < NJ; jj+=16){
+           
+            // unrolling
+            __m256 sumV[8];
+            sumV[0] = _mm256_setzero_ps();
+            sumV[1] = _mm256_setzero_ps();
+            sumV[2] = _mm256_setzero_ps();
+            sumV[3] = _mm256_setzero_ps();
+            sumV[4] = _mm256_setzero_ps();
+            sumV[5] = _mm256_setzero_ps();
+            sumV[6] = _mm256_setzero_ps();
+            sumV[7] = _mm256_setzero_ps();
+
+            for(kk = k; kk < k+tileSize && kk < NK; kk++){
+              __m256 aV[4];
+              aV[0] = _mm256_set1_ps(A[((ii+0)<<12)+kk]);
+              aV[1] = _mm256_set1_ps(A[((ii+1)<<12)+kk]);
+              aV[2] = _mm256_set1_ps(A[((ii+2)<<12)+kk]);
+              aV[3] = _mm256_set1_ps(A[((ii+3)<<12)+kk]);
+
+              __m256 bV[2];
+              bV[0] = _mm256_loadu_ps(&B[(kk<<12) + (jj)]);
+              bV[1] = _mm256_loadu_ps(&B[(kk<<12) + (jj+8)]);
+              
+              sumV[0] = _mm256_fmadd_ps(aV[0], bV[0], sumV[0]);
+              sumV[1] = _mm256_fmadd_ps(aV[0], bV[1], sumV[1]);
+              sumV[2] = _mm256_fmadd_ps(aV[1], bV[0], sumV[2]);
+              sumV[3] = _mm256_fmadd_ps(aV[1], bV[1], sumV[3]);
+              sumV[4] = _mm256_fmadd_ps(aV[2], bV[0], sumV[4]);
+              sumV[5] = _mm256_fmadd_ps(aV[2], bV[1], sumV[5]);
+              sumV[6] = _mm256_fmadd_ps(aV[3], bV[0], sumV[6]);
+              sumV[7] = _mm256_fmadd_ps(aV[3], bV[1], sumV[7]);             
+            }
+
+            //MULTIPLICATION BY ALPHA:  
+            //alpha = 1.5, therefore sumV * alpha = 0.5*sumV + sumV
+            sumV[0] = _mm256_fmadd_ps(sumV[0], _mm256_set1_ps(0.5f), sumV[0]);
+            sumV[1] = _mm256_fmadd_ps(sumV[1], _mm256_set1_ps(0.5f), sumV[1]);
+            sumV[2] = _mm256_fmadd_ps(sumV[2], _mm256_set1_ps(0.5f), sumV[2]);
+            sumV[3] = _mm256_fmadd_ps(sumV[3], _mm256_set1_ps(0.5f), sumV[3]);
+            sumV[4] = _mm256_fmadd_ps(sumV[4], _mm256_set1_ps(0.5f), sumV[4]);
+            sumV[5] = _mm256_fmadd_ps(sumV[5], _mm256_set1_ps(0.5f), sumV[5]);
+            sumV[6] = _mm256_fmadd_ps(sumV[6], _mm256_set1_ps(0.5f), sumV[6]);
+            sumV[7] = _mm256_fmadd_ps(sumV[7], _mm256_set1_ps(0.5f), sumV[7]);
+
+
+            __m256 cV[8];
+            cV[0] = _mm256_loadu_ps(&C[((ii+0)<<12) + (jj)]);
+            cV[1] = _mm256_loadu_ps(&C[((ii+0)<<12) + (jj+8)]);
+            cV[2] = _mm256_loadu_ps(&C[((ii+1)<<12) + (jj)]);
+            cV[3] = _mm256_loadu_ps(&C[((ii+1)<<12) + (jj+8)]);
+            cV[4] = _mm256_loadu_ps(&C[((ii+2)<<12) + (jj)]);
+            cV[5] = _mm256_loadu_ps(&C[((ii+2)<<12) + (jj+8)]);
+            cV[6] = _mm256_loadu_ps(&C[((ii+3)<<12) + (jj)]);
+            cV[7] = _mm256_loadu_ps(&C[((ii+3)<<12) + (jj+8)]);
+
+            cV[0] = _mm256_add_ps(cV[0], sumV[0]);
+            cV[1] = _mm256_add_ps(cV[1], sumV[1]);
+            cV[2] = _mm256_add_ps(cV[2], sumV[2]);
+            cV[3] = _mm256_add_ps(cV[3], sumV[3]);
+            cV[4] = _mm256_add_ps(cV[4], sumV[4]);
+            cV[5] = _mm256_add_ps(cV[5], sumV[5]);
+            cV[6] = _mm256_add_ps(cV[6], sumV[6]);
+            cV[7] = _mm256_add_ps(cV[7], sumV[7]);
+
+            _mm256_storeu_ps(&C[((ii+0)<<12) + (jj)], cV[0]);
+            _mm256_storeu_ps(&C[((ii+0)<<12) + (jj+8)], cV[1]);
+            _mm256_storeu_ps(&C[((ii+1)<<12) + (jj)], cV[2]);
+            _mm256_storeu_ps(&C[((ii+1)<<12) + (jj+8)], cV[3]);
+            _mm256_storeu_ps(&C[((ii+2)<<12) + (jj)], cV[4]);
+            _mm256_storeu_ps(&C[((ii+2)<<12) + (jj+8)], cV[5]);
+            _mm256_storeu_ps(&C[((ii+3)<<12) + (jj)], cV[6]);
+            _mm256_storeu_ps(&C[((ii+3)<<12) + (jj+8)], cV[7]);
+          }
+        }
+
+      }
+
+    }
   }
 }
-
 
 int main(int argc, char** argv)
 {
@@ -123,49 +175,26 @@ int main(int argc, char** argv)
   float *B = (float *)malloc(NK*NJ*sizeof(float));
   float *C = (float *)malloc(NI*NJ*sizeof(float));
 
-  bool parallel_outer = false;
-  int choice;
- 
-  int num_threads = 1;
-  while (1){
-    printf("Enter number of threads: "); 
-    scanf("%d", &num_threads);
-    if (num_threads > 0){
-      break;
-    }
-    else{
-      printf("Invalid input. The number of threads cannot be less than or equal to 0\n\n");
-    }
+  /* Initialize array(s). */
+  init_array (C, A, B);
 
-  }
+  /* Start timer. */
+  timespec timer = tic();
 
-  
-  float sum = 0;
-  int trials = 3;
-  for (int i = 0; i<trials; i++){
-    /* Initialize array(s). */
-    init_array (C, A, B);
+  /* Run kernel. */
+  kernel_gemm (C, A, B, 1.5, 2.5);
 
-    /* Start timer. */
-    timespec timer = tic();
-
-    /* Run kernel. */
-    kernel_gemm (C, A, B, 1.5, 2.5, num_threads);
-    
-    /* Stop and print timer. */
-    sum += toc(&timer, "kernel execution");
-  }
+  printf("hello this is a test\n");
+  /* Stop and print timer. */
+  toc(&timer, "kernel execution");
   
   /* Print results. */
   print_array_sum (C);
 
-  //printing the average time: 
-  printf("average time cost: %f \n", sum / trials);
-  
   /* free memory for A, B, C */
   free(A);
   free(B);
   free(C);
-
+  
   return 0;
 }
