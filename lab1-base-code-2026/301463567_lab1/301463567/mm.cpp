@@ -70,7 +70,7 @@ void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, fl
   const int tileSize_j = 256;
   const int tileSize_k = 64;
 
-  omp_set_num_threads(18);
+  omp_set_num_threads(20);
   #pragma omp parallel for collapse(2) private(i,j,k,ii,jj,kk)
   for(i = 0; i < NI; i += tileSize_i){
     for(j = 0; j < NJ; j += tileSize_j){
