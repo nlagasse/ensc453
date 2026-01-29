@@ -6,7 +6,6 @@
 #include <omp.h>
 #include <math.h> 
 
-
 #define NI 4096
 #define NJ 4096
 #define NK 4096
@@ -67,16 +66,16 @@ void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, fl
 //A is NIxNK
 //B is NKxNJ
 //C is NIxNJ
-  const int tileSize = 256;
-  __m256 alphaV = _mm256_set1_ps(alpha);
-  __m256 betaV = _mm256_set1_ps(beta);
+  const int tileSize_i = 128;
+  const int tileSize_j = 256;
+  const int tileSize_k = 64;
 
   omp_set_num_threads(18);
-  #pragma omp parallel for collapse(2)
-  for(i = 0; i < NI; i += tileSize){
-    for(j = 0; j < NJ; j += tileSize){
-      for(ii = i; ii < i+tileSize && ii < NI; ii++){
-        for(jj = j; jj < j+tileSize && jj < NJ; jj+=8){
+  #pragma omp parallel for collapse(2) private(i,j,k,ii,jj,kk)
+  for(i = 0; i < NI; i += tileSize_i){
+    for(j = 0; j < NJ; j += tileSize_j){
+      for(ii = i; ii < i+tileSize_i && ii < NI; ii++){
+        for(jj = j; jj < j+tileSize_j && jj < NJ; jj+=8){
 
           //multiplying by BETA here: 
           __m256 cV = _mm256_loadu_ps(&C[(ii << 12) + jj]);
@@ -84,9 +83,9 @@ void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, fl
           _mm256_storeu_ps(&C[((ii+0)<<12) + jj], cV);
         }
       }
-      for(k = 0; k < NK; k += tileSize){
-        for(ii = i; ii < i+tileSize && ii < NI; ii+=4){
-          for(jj = j; jj < j+tileSize && jj < NJ; jj+=16){
+      for(k = 0; k < NK; k += tileSize_k){
+        for(ii = i; ii < i+tileSize_i && ii < NI; ii+=4){
+          for(jj = j; jj < j+tileSize_j && jj < NJ; jj+=16){
            
             // unrolling
             __m256 sumV[8];
@@ -99,7 +98,7 @@ void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, fl
             sumV[6] = _mm256_setzero_ps();
             sumV[7] = _mm256_setzero_ps();
 
-            for(kk = k; kk < k+tileSize && kk < NK; kk++){
+            for(kk = k; kk < k+tileSize_k && kk < NK; kk++){
               __m256 aV[4];
               aV[0] = _mm256_set1_ps(A[((ii+0)<<12)+kk]);
               aV[1] = _mm256_set1_ps(A[((ii+1)<<12)+kk]);
