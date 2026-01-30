@@ -10,6 +10,9 @@
 #define NJ 4096
 #define NK 4096
 
+#define TILE_N 128
+#define Unroll 8
+
 /* Array initialization. */
 static
 void init_array(float C[NI*NJ], float A[NI*NK], float B[NK*NJ])
@@ -56,173 +59,131 @@ void print_array_sum(float C[NI*NJ])
   printf("sum of C array = %f\n", sum);
 }
 
-/* Main computational kernel with tiling. The whole function will be timed, 
-including the call and return. */
+// Default function
 static
-void kernel_gemm_T(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
+void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
+{
+  int i, j, k;
+
+// => Form C := alpha*A*B + beta*C,
+//A is NIxNK
+//B is NKxNJ
+//C is NIxNJ
+  for (i = 0; i < NI; i++) {
+    for (j = 0; j < NJ; j++) {
+      C[i*NJ+j] *= beta;
+    }
+    for (j = 0; j < NJ; j++) {
+      for (k = 0; k < NK; ++k) {
+	C[i*NJ+j] += alpha * A[i*NK+k] * B[k*NJ+j];
+      }
+    }
+  }
+}
+
+/* Main computational kernel with tiling. */
+static
+void kernel_gemm_t(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
 {
   int i, j, k, ii, jj, kk;
 
-  const int tileSize_i = 128;
-  const int tileSize_j = 256;
-  const int tileSize_k = 64;
+  // Performance for C *= beta is negligible
+  for(i = 0; i < NI; i++){
+    for(j = 0; j < NJ; j++){
+      C[i*NJ+j] *= beta;
+    }
+  }
+  
+  // Tiling
+  for (ii =  0 ; ii < NI; ii += TILE_N){
+    for (kk = 0; kk < NK; kk += TILE_N){
+      for(jj = 0; jj < NJ; jj += TILE_N){
+      
+        // Inside tiles
+        for (i = ii; i < ii + TILE_N; i+= Unroll){
+          for (k = kk; k < kk + TILE_N; k++){
 
-  for(i = 0; i < NI; i += tileSize_i){
-    for(j = 0; j < NJ; j += tileSize_j){
+            // Unrolling a * A
+            float A0 = alpha * A[(i + 0) * NK + k];
+            float A1 = alpha * A[(i + 1) * NK + k];
+            float A2 = alpha * A[(i + 2) * NK + k];
+            float A3 = alpha * A[(i + 3) * NK + k];
+            float A4 = alpha * A[(i + 4) * NK + k]; 
+            float A5 = alpha * A[(i + 5) * NK + k];
+            float A6 = alpha * A[(i + 6) * NK + k];
+            float A7 = alpha * A[(i + 7) * NK + k];
 
-      // beta tiled
-      for(ii = i; ii < i+tileSize_i && ii < NI; ii++){
-        for(jj = j; jj < j+tileSize_j && jj < NJ; jj++){
+            for(j = jj; j < jj + TILE_N; j++){
+              // Load a chunk of B
+              float load_B = B[k*NJ+j];
+              // Unrolling A_updated * B
+              C[(i + 0) * NJ + j] += A0 * load_B;
+              C[(i + 1) * NJ + j] += A1 * load_B;
+              C[(i + 2) * NJ + j] += A2 * load_B;
+              C[(i + 3) * NJ + j] += A3 * load_B;
+              C[(i + 4) * NJ + j] += A4 * load_B;
+              C[(i + 5) * NJ + j] += A5 * load_B;
+              C[(i + 6) * NJ + j] += A6 * load_B;
+              C[(i + 7) * NJ + j] += A7 * load_B;
 
-          C[ii*NJ + jj] *= beta;
 
-        }
-      }
-
-      // gemm tiled
-      for(k = 0; k < NK; k += tileSize_k){
-        for(ii = i; ii < i+tileSize_i && ii < NI; ii+=4){
-          for(jj = j; jj < j+tileSize_j && jj < NJ; jj+=2){
-
-            float sum[8];
-            sum[0] = 0;
-            sum[1] = 0;
-            sum[2] = 0;
-            sum[3] = 0;
-            sum[4] = 0;
-            sum[5] = 0;
-            sum[6] = 0;
-            sum[7] = 0;
-            for(kk = k; kk < k+tileSize_k && kk < NK; kk++){
-              sum[0] += alpha * A[(ii+0)*NK + kk] * B[kk*NJ + (jj+0)];
-              sum[1] += alpha * A[(ii+0)*NK + kk] * B[kk*NJ + (jj+1)];
-              sum[2] += alpha * A[(ii+1)*NK + kk] * B[kk*NJ + (jj+0)];
-              sum[3] += alpha * A[(ii+1)*NK + kk] * B[kk*NJ + (jj+1)];
-              sum[4] += alpha * A[(ii+2)*NK + kk] * B[kk*NJ + (jj+0)];
-              sum[5] += alpha * A[(ii+2)*NK + kk] * B[kk*NJ + (jj+1)];
-              sum[6] += alpha * A[(ii+3)*NK + kk] * B[kk*NJ + (jj+0)];
-              sum[7] += alpha * A[(ii+3)*NK + kk] * B[kk*NJ + (jj+1)];
             }
-            C[(ii+0)*NJ + (jj+0)] += sum[0];
-            C[(ii+0)*NJ + (jj+1)] += sum[1];
-            C[(ii+1)*NJ + (jj+0)] += sum[2];
-            C[(ii+1)*NJ + (jj+1)] += sum[3];
-            C[(ii+2)*NJ + (jj+0)] += sum[4];
-            C[(ii+2)*NJ + (jj+1)] += sum[5];
-            C[(ii+3)*NJ + (jj+0)] += sum[6];
-            C[(ii+3)*NJ + (jj+1)] += sum[7];
-
           }
         }
       }
-
     }
   }
-
 }
 
-/* Main computational kernel with tiling and vectorization. The whole function will be timed,
-   including the call and return. */
+/* Main computational kernel with tiling and vectorization. */
 static
-__attribute__((target("avx2,fma")))
-void kernel_gemm_TV(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
+void kernel_gemm_tv(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
 {
   int i, j, k, ii, jj, kk;
 
-  const int tileSize_i = 128;
-  const int tileSize_j = 256;
-  const int tileSize_k = 64;
+  // Performance for C *= beta is negligible
+  for(i = 0; i < NI; i++){
+    for(j = 0; j < NJ; j++){
+      C[i*NJ+j] *= beta;
+    }
+  }
+  
+  // Tiling
+  for (ii =  0 ; ii < NI; ii += TILE_N){
+    for (kk = 0; kk < NK; kk += TILE_N){
+      for(jj = 0; jj < NJ; jj += TILE_N){
+      
+        // Inside tiles
+        for (i = ii; i < ii + TILE_N; i+= Unroll){
+          for (k = kk; k < kk + TILE_N; k++){
 
-  for(i = 0; i < NI; i += tileSize_i){
-    for(j = 0; j < NJ; j += tileSize_j){
-    
-      //beta
-      for(ii = i; ii < i+tileSize_i && ii < NI; ii++){
-        for(jj = j; jj < j+tileSize_j && jj < NJ; jj+=8){
+            // Unrolling a * A
+            float A0 = alpha * A[(i + 0) * NK + k];
+            float A1 = alpha * A[(i + 1) * NK + k];
+            float A2 = alpha * A[(i + 2) * NK + k];
+            float A3 = alpha * A[(i + 3) * NK + k];
+            float A4 = alpha * A[(i + 4) * NK + k]; 
+            float A5 = alpha * A[(i + 5) * NK + k];
+            float A6 = alpha * A[(i + 6) * NK + k];
+            float A7 = alpha * A[(i + 7) * NK + k];
 
-          __m256 cV = _mm256_loadu_ps(&C[(ii << 12) + jj]);
-          cV = _mm256_mul_ps(cV, _mm256_set1_ps(beta));
-          _mm256_storeu_ps(&C[((ii+0)<<12) + jj], cV);
+            // Vectorization
+            #pragma omp simd
+            for(j = jj; j < jj + TILE_N; j++){
+              // Load a chunk of B
+              float load_B = B[k*NJ+j];
+              // Unrolling A_updated * B
+              C[(i + 0) * NJ + j] += A0 * load_B;
+              C[(i + 1) * NJ + j] += A1 * load_B;
+              C[(i + 2) * NJ + j] += A2 * load_B;
+              C[(i + 3) * NJ + j] += A3 * load_B;
+              C[(i + 4) * NJ + j] += A4 * load_B;
+              C[(i + 5) * NJ + j] += A5 * load_B;
+              C[(i + 6) * NJ + j] += A6 * load_B;
+              C[(i + 7) * NJ + j] += A7 * load_B;
 
-        }
-      }
-      for(k = 0; k < NK; k += tileSize_k){
-        for(ii = i; ii < i+tileSize_i && ii < NI; ii+=4){
-          for(jj = j; jj < j+tileSize_j && jj < NJ; jj+=16){
-           
-            // unrolling
-            __m256 sumV[8];
-            sumV[0] = _mm256_setzero_ps();
-            sumV[1] = _mm256_setzero_ps();
-            sumV[2] = _mm256_setzero_ps();
-            sumV[3] = _mm256_setzero_ps();
-            sumV[4] = _mm256_setzero_ps();
-            sumV[5] = _mm256_setzero_ps();
-            sumV[6] = _mm256_setzero_ps();
-            sumV[7] = _mm256_setzero_ps();
 
-            for(kk = k; kk < k+tileSize_k && kk < NK; kk++){
-              __m256 aV[4];
-              aV[0] = _mm256_set1_ps(A[((ii+0)<<12)+kk]);
-              aV[1] = _mm256_set1_ps(A[((ii+1)<<12)+kk]);
-              aV[2] = _mm256_set1_ps(A[((ii+2)<<12)+kk]);
-              aV[3] = _mm256_set1_ps(A[((ii+3)<<12)+kk]);
-
-              __m256 bV[2];
-              bV[0] = _mm256_loadu_ps(&B[(kk<<12) + (jj)]);
-              bV[1] = _mm256_loadu_ps(&B[(kk<<12) + (jj+8)]);
-              
-              sumV[0] = _mm256_add_ps(sumV[0], _mm256_mul_ps(aV[0], bV[0]));
-              sumV[1] = _mm256_add_ps(sumV[1], _mm256_mul_ps(aV[0], bV[1]));
-              sumV[2] = _mm256_add_ps(sumV[2], _mm256_mul_ps(aV[1], bV[0]));
-              sumV[3] = _mm256_add_ps(sumV[3], _mm256_mul_ps(aV[1], bV[1]));
-              sumV[4] = _mm256_add_ps(sumV[4], _mm256_mul_ps(aV[2], bV[0]));
-              sumV[5] = _mm256_add_ps(sumV[5], _mm256_mul_ps(aV[2], bV[1]));
-              sumV[6] = _mm256_add_ps(sumV[6], _mm256_mul_ps(aV[3], bV[0]));
-              sumV[7] = _mm256_add_ps(sumV[7], _mm256_mul_ps(aV[3], bV[1]));           
             }
-
-            //MULTIPLICATION BY ALPHA:  
-            //alpha = 1.5, therefore sumV * alpha = 0.5*sumV + sumV
-            __m256 half = _mm256_set1_ps(0.5f);
-
-            sumV[0] = _mm256_add_ps(sumV[0], _mm256_mul_ps(sumV[0], half));
-            sumV[1] = _mm256_add_ps(sumV[1], _mm256_mul_ps(sumV[1], half));
-            sumV[2] = _mm256_add_ps(sumV[2], _mm256_mul_ps(sumV[2], half));
-            sumV[3] = _mm256_add_ps(sumV[3], _mm256_mul_ps(sumV[3], half));
-            sumV[4] = _mm256_add_ps(sumV[4], _mm256_mul_ps(sumV[4], half));
-            sumV[5] = _mm256_add_ps(sumV[5], _mm256_mul_ps(sumV[5], half));
-            sumV[6] = _mm256_add_ps(sumV[6], _mm256_mul_ps(sumV[6], half));
-            sumV[7] = _mm256_add_ps(sumV[7], _mm256_mul_ps(sumV[7], half));
-
-
-            __m256 cV[8];
-            cV[0] = _mm256_loadu_ps(&C[((ii+0)<<12) + (jj)]);
-            cV[1] = _mm256_loadu_ps(&C[((ii+0)<<12) + (jj+8)]);
-            cV[2] = _mm256_loadu_ps(&C[((ii+1)<<12) + (jj)]);
-            cV[3] = _mm256_loadu_ps(&C[((ii+1)<<12) + (jj+8)]);
-            cV[4] = _mm256_loadu_ps(&C[((ii+2)<<12) + (jj)]);
-            cV[5] = _mm256_loadu_ps(&C[((ii+2)<<12) + (jj+8)]);
-            cV[6] = _mm256_loadu_ps(&C[((ii+3)<<12) + (jj)]);
-            cV[7] = _mm256_loadu_ps(&C[((ii+3)<<12) + (jj+8)]);
-
-            cV[0] = _mm256_add_ps(cV[0], sumV[0]);
-            cV[1] = _mm256_add_ps(cV[1], sumV[1]);
-            cV[2] = _mm256_add_ps(cV[2], sumV[2]);
-            cV[3] = _mm256_add_ps(cV[3], sumV[3]);
-            cV[4] = _mm256_add_ps(cV[4], sumV[4]);
-            cV[5] = _mm256_add_ps(cV[5], sumV[5]);
-            cV[6] = _mm256_add_ps(cV[6], sumV[6]);
-            cV[7] = _mm256_add_ps(cV[7], sumV[7]);
-
-            _mm256_storeu_ps(&C[((ii+0)<<12) + (jj)], cV[0]);
-            _mm256_storeu_ps(&C[((ii+0)<<12) + (jj+8)], cV[1]);
-            _mm256_storeu_ps(&C[((ii+1)<<12) + (jj)], cV[2]);
-            _mm256_storeu_ps(&C[((ii+1)<<12) + (jj+8)], cV[3]);
-            _mm256_storeu_ps(&C[((ii+2)<<12) + (jj)], cV[4]);
-            _mm256_storeu_ps(&C[((ii+2)<<12) + (jj+8)], cV[5]);
-            _mm256_storeu_ps(&C[((ii+3)<<12) + (jj)], cV[6]);
-            _mm256_storeu_ps(&C[((ii+3)<<12) + (jj+8)], cV[7]);
           }
         }
       }
@@ -232,112 +193,55 @@ void kernel_gemm_TV(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha,
 
 /* Main computational kernel: with tiling, simd, and parallelization optimizations. */
 static
-__attribute__((target("avx2,fma")))
-void kernel_gemm_TVP(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
+void kernel_gemm_tvp(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
 {
   int i, j, k, ii, jj, kk;
 
-// => Form C := alpha*A*B + beta*C,
-//A is NIxNK
-//B is NKxNJ
-//C is NIxNJ
-  const int tileSize_i = 128;
-  const int tileSize_j = 256;
-  const int tileSize_k = 64;
+  // Performance for C *= beta is negligible
+  for(i = 0; i < NI; i++){
+    for(j = 0; j < NJ; j++){
+      C[i*NJ+j] *= beta;
+    }
+  }
+  
+  // Parallel for on outer loop
+  #pragma omp parallel for private (i,j,k,ii,jj,kk)
+  // Tiling
+  for (ii =  0 ; ii < NI; ii += TILE_N){
+    for (kk = 0; kk < NK; kk += TILE_N){
+      for(jj = 0; jj < NJ; jj += TILE_N){
+      
+        // Inside tiles
+        for (i = ii; i < ii + TILE_N; i+= Unroll){
+          for (k = kk; k < kk + TILE_N; k++){
 
-  // __m256 alphaV = _mm256_set1_ps(alpha);
-  // __m256 betaV  = _mm256_set1_ps(beta);
+            // Unrolling a * A
+            float A0 = alpha * A[(i + 0) * NK + k];
+            float A1 = alpha * A[(i + 1) * NK + k];
+            float A2 = alpha * A[(i + 2) * NK + k];
+            float A3 = alpha * A[(i + 3) * NK + k];
+            float A4 = alpha * A[(i + 4) * NK + k]; 
+            float A5 = alpha * A[(i + 5) * NK + k];
+            float A6 = alpha * A[(i + 6) * NK + k];
+            float A7 = alpha * A[(i + 7) * NK + k];
 
-  omp_set_num_threads(20);
-  #pragma omp parallel for collapse(2) private(i,j,k,ii,jj,kk)
-  for(i = 0; i < NI; i += tileSize_i){
-    for(j = 0; j < NJ; j += tileSize_j){
-      for(ii = i; ii < i+tileSize_i && ii < NI; ii++){
-        for(jj = j; jj < j+tileSize_j && jj < NJ; jj+=8){
+            // Vectorization
+            #pragma omp simd
+            for(j = jj; j < jj + TILE_N; j++){
+              // Load a chunk of B
+              float load_B = B[k*NJ+j];
+              // Unrolling A_updated * B
+              C[(i + 0) * NJ + j] += A0 * load_B;
+              C[(i + 1) * NJ + j] += A1 * load_B;
+              C[(i + 2) * NJ + j] += A2 * load_B;
+              C[(i + 3) * NJ + j] += A3 * load_B;
+              C[(i + 4) * NJ + j] += A4 * load_B;
+              C[(i + 5) * NJ + j] += A5 * load_B;
+              C[(i + 6) * NJ + j] += A6 * load_B;
+              C[(i + 7) * NJ + j] += A7 * load_B;
 
-          //multiplying by BETA here: 
-          __m256 cV = _mm256_loadu_ps(&C[(ii << 12) + jj]);
-          cV = _mm256_mul_ps(cV, _mm256_set1_ps(beta));
-          _mm256_storeu_ps(&C[((ii+0)<<12) + jj], cV);
-        }
-      }
-      for(k = 0; k < NK; k += tileSize_k){
-        for(ii = i; ii < i+tileSize_i && ii < NI; ii+=4){
-          for(jj = j; jj < j+tileSize_j && jj < NJ; jj+=16){
-           
-            // unrolling
-            __m256 sumV[8];
-            sumV[0] = _mm256_setzero_ps();
-            sumV[1] = _mm256_setzero_ps();
-            sumV[2] = _mm256_setzero_ps();
-            sumV[3] = _mm256_setzero_ps();
-            sumV[4] = _mm256_setzero_ps();
-            sumV[5] = _mm256_setzero_ps();
-            sumV[6] = _mm256_setzero_ps();
-            sumV[7] = _mm256_setzero_ps();
 
-            for(kk = k; kk < k+tileSize_k && kk < NK; kk++){
-              __m256 aV[4];
-              aV[0] = _mm256_set1_ps(A[((ii+0)<<12)+kk]);
-              aV[1] = _mm256_set1_ps(A[((ii+1)<<12)+kk]);
-              aV[2] = _mm256_set1_ps(A[((ii+2)<<12)+kk]);
-              aV[3] = _mm256_set1_ps(A[((ii+3)<<12)+kk]);
-
-              __m256 bV[2];
-              bV[0] = _mm256_loadu_ps(&B[(kk<<12) + (jj)]);
-              bV[1] = _mm256_loadu_ps(&B[(kk<<12) + (jj+8)]);
-              
-              sumV[0] = _mm256_add_ps(sumV[0], _mm256_mul_ps(aV[0], bV[0]));
-              sumV[1] = _mm256_add_ps(sumV[1], _mm256_mul_ps(aV[0], bV[1]));
-              sumV[2] = _mm256_add_ps(sumV[2], _mm256_mul_ps(aV[1], bV[0]));
-              sumV[3] = _mm256_add_ps(sumV[3], _mm256_mul_ps(aV[1], bV[1]));
-              sumV[4] = _mm256_add_ps(sumV[4], _mm256_mul_ps(aV[2], bV[0]));
-              sumV[5] = _mm256_add_ps(sumV[5], _mm256_mul_ps(aV[2], bV[1]));
-              sumV[6] = _mm256_add_ps(sumV[6], _mm256_mul_ps(aV[3], bV[0]));
-              sumV[7] = _mm256_add_ps(sumV[7], _mm256_mul_ps(aV[3], bV[1]));           
             }
-
-            //MULTIPLICATION BY ALPHA:  
-            //alpha = 1.5, therefore sumV * alpha = 0.5*sumV + sumV
-            __m256 half = _mm256_set1_ps(0.5f);
-
-            sumV[0] = _mm256_add_ps(sumV[0], _mm256_mul_ps(sumV[0], half));
-            sumV[1] = _mm256_add_ps(sumV[1], _mm256_mul_ps(sumV[1], half));
-            sumV[2] = _mm256_add_ps(sumV[2], _mm256_mul_ps(sumV[2], half));
-            sumV[3] = _mm256_add_ps(sumV[3], _mm256_mul_ps(sumV[3], half));
-            sumV[4] = _mm256_add_ps(sumV[4], _mm256_mul_ps(sumV[4], half));
-            sumV[5] = _mm256_add_ps(sumV[5], _mm256_mul_ps(sumV[5], half));
-            sumV[6] = _mm256_add_ps(sumV[6], _mm256_mul_ps(sumV[6], half));
-            sumV[7] = _mm256_add_ps(sumV[7], _mm256_mul_ps(sumV[7], half));
-
-
-            __m256 cV[8];
-            cV[0] = _mm256_loadu_ps(&C[((ii+0)<<12) + (jj)]);
-            cV[1] = _mm256_loadu_ps(&C[((ii+0)<<12) + (jj+8)]);
-            cV[2] = _mm256_loadu_ps(&C[((ii+1)<<12) + (jj)]);
-            cV[3] = _mm256_loadu_ps(&C[((ii+1)<<12) + (jj+8)]);
-            cV[4] = _mm256_loadu_ps(&C[((ii+2)<<12) + (jj)]);
-            cV[5] = _mm256_loadu_ps(&C[((ii+2)<<12) + (jj+8)]);
-            cV[6] = _mm256_loadu_ps(&C[((ii+3)<<12) + (jj)]);
-            cV[7] = _mm256_loadu_ps(&C[((ii+3)<<12) + (jj+8)]);
-
-            cV[0] = _mm256_add_ps(cV[0], sumV[0]);
-            cV[1] = _mm256_add_ps(cV[1], sumV[1]);
-            cV[2] = _mm256_add_ps(cV[2], sumV[2]);
-            cV[3] = _mm256_add_ps(cV[3], sumV[3]);
-            cV[4] = _mm256_add_ps(cV[4], sumV[4]);
-            cV[5] = _mm256_add_ps(cV[5], sumV[5]);
-            cV[6] = _mm256_add_ps(cV[6], sumV[6]);
-            cV[7] = _mm256_add_ps(cV[7], sumV[7]);
-
-            _mm256_storeu_ps(&C[((ii+0)<<12) + (jj)], cV[0]);
-            _mm256_storeu_ps(&C[((ii+0)<<12) + (jj+8)], cV[1]);
-            _mm256_storeu_ps(&C[((ii+1)<<12) + (jj)], cV[2]);
-            _mm256_storeu_ps(&C[((ii+1)<<12) + (jj+8)], cV[3]);
-            _mm256_storeu_ps(&C[((ii+2)<<12) + (jj)], cV[4]);
-            _mm256_storeu_ps(&C[((ii+2)<<12) + (jj+8)], cV[5]);
-            _mm256_storeu_ps(&C[((ii+3)<<12) + (jj)], cV[6]);
-            _mm256_storeu_ps(&C[((ii+3)<<12) + (jj+8)], cV[7]);
           }
         }
       }
@@ -359,8 +263,8 @@ int main(int argc, char** argv)
   timespec timer = tic();
 
   /* Run kernel. */
-  // REPLACE THIS FUNCTION WITH T, TV, OR TVP FOR DIFFERENT EXECUTION
-  kernel_gemm_T(C, A, B, 1.5, 2.5);
+  // REPLACE THIS FUNCTION WITH [t/tv/tvp] FOR DIFFERENT EXECUTION
+  kernel_gemm_tvp(C, A, B, 1.5, 2.5);
 
   printf("testing\n");
   /* Stop and print timer. */
