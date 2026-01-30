@@ -72,7 +72,7 @@ void kernel_gemm_T(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, 
 
       // beta tiled
       for(ii = i; ii < i+tileSize_i && ii < NI; ii++){
-        for(jj = j; jj < j+tileSize_j && jj < NJ; jj+=8){
+        for(jj = j; jj < j+tileSize_j && jj < NJ; jj++){
 
           C[ii*NJ + jj] *= beta;
 
@@ -82,15 +82,35 @@ void kernel_gemm_T(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, 
       // gemm tiled
       for(k = 0; k < NK; k += tileSize_k){
         for(ii = i; ii < i+tileSize_i && ii < NI; ii+=4){
-          for(jj = j; jj < j+tileSize_j && jj < NJ; jj+=16){
+          for(jj = j; jj < j+tileSize_j && jj < NJ; jj+=2){
 
-            float sum = 0.0f;
-
-            for (kk = k; kk < k + tileSize_k && kk < NK; kk++) {
-              sum += A[ii*NK + kk] * B[kk*NJ + jj];
+            float sum[8];
+            sum[0] = 0;
+            sum[1] = 0;
+            sum[2] = 0;
+            sum[3] = 0;
+            sum[4] = 0;
+            sum[5] = 0;
+            sum[6] = 0;
+            sum[7] = 0;
+            for(kk = k; kk < k+tileSize_k && kk < NK; kk++){
+              sum[0] += alpha * A[(ii+0)*NK + kk] * B[kk*NJ + (jj+0)];
+              sum[1] += alpha * A[(ii+0)*NK + kk] * B[kk*NJ + (jj+1)];
+              sum[2] += alpha * A[(ii+1)*NK + kk] * B[kk*NJ + (jj+0)];
+              sum[3] += alpha * A[(ii+1)*NK + kk] * B[kk*NJ + (jj+1)];
+              sum[4] += alpha * A[(ii+2)*NK + kk] * B[kk*NJ + (jj+0)];
+              sum[5] += alpha * A[(ii+2)*NK + kk] * B[kk*NJ + (jj+1)];
+              sum[6] += alpha * A[(ii+3)*NK + kk] * B[kk*NJ + (jj+0)];
+              sum[7] += alpha * A[(ii+3)*NK + kk] * B[kk*NJ + (jj+1)];
             }
-
-            C[ii*NJ + jj] += alpha * sum;
+            C[(ii+0)*NJ + (jj+0)] += sum[0];
+            C[(ii+0)*NJ + (jj+1)] += sum[1];
+            C[(ii+1)*NJ + (jj+0)] += sum[2];
+            C[(ii+1)*NJ + (jj+1)] += sum[3];
+            C[(ii+2)*NJ + (jj+0)] += sum[4];
+            C[(ii+2)*NJ + (jj+1)] += sum[5];
+            C[(ii+3)*NJ + (jj+0)] += sum[6];
+            C[(ii+3)*NJ + (jj+1)] += sum[7];
 
           }
         }
