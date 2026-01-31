@@ -10,8 +10,9 @@
 #define NJ 4096
 #define NK 4096
 
-#define TILE_N 128
+#define TILE_SIZE 64
 #define Unroll 8
+#define NUM_THREADS 20
 
 /* Array initialization. */
 static
@@ -95,13 +96,13 @@ void kernel_gemm_t(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, 
   }
   
   // Tiling
-  for (ii =  0 ; ii < NI; ii += TILE_N){
-    for (kk = 0; kk < NK; kk += TILE_N){
-      for(jj = 0; jj < NJ; jj += TILE_N){
+  for (ii =  0 ; ii < NI; ii += TILE_SIZE){
+    for (kk = 0; kk < NK; kk += TILE_SIZE){
+      for(jj = 0; jj < NJ; jj += TILE_SIZE){
       
         // Inside tiles
-        for (i = ii; i < ii + TILE_N; i+= Unroll){
-          for (k = kk; k < kk + TILE_N; k++){
+        for (i = ii; i < ii + TILE_SIZE; i+= Unroll){
+          for (k = kk; k < kk + TILE_SIZE; k++){
 
             // Unrolling a * A
             float A0 = alpha * A[(i + 0) * NK + k];
@@ -113,7 +114,7 @@ void kernel_gemm_t(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, 
             float A6 = alpha * A[(i + 6) * NK + k];
             float A7 = alpha * A[(i + 7) * NK + k];
 
-            for(j = jj; j < jj + TILE_N; j++){
+            for(j = jj; j < jj + TILE_SIZE; j++){
               // Load a chunk of B
               float load_B = B[k*NJ+j];
               // Unrolling A_updated * B
@@ -137,6 +138,7 @@ void kernel_gemm_t(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, 
 
 /* Main computational kernel with tiling and vectorization. */
 static
+__attribute__((target("avx2")))
 void kernel_gemm_tv(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
 {
   int i, j, k, ii, jj, kk;
@@ -149,13 +151,13 @@ void kernel_gemm_tv(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha,
   }
   
   // Tiling
-  for (ii =  0 ; ii < NI; ii += TILE_N){
-    for (kk = 0; kk < NK; kk += TILE_N){
-      for(jj = 0; jj < NJ; jj += TILE_N){
+  for (ii =  0 ; ii < NI; ii += TILE_SIZE){
+    for (kk = 0; kk < NK; kk += TILE_SIZE){
+      for(jj = 0; jj < NJ; jj += TILE_SIZE){
       
         // Inside tiles
-        for (i = ii; i < ii + TILE_N; i+= Unroll){
-          for (k = kk; k < kk + TILE_N; k++){
+        for (i = ii; i < ii + TILE_SIZE; i+= Unroll){
+          for (k = kk; k < kk + TILE_SIZE; k++){
 
             // Unrolling a * A
             float A0 = alpha * A[(i + 0) * NK + k];
@@ -169,7 +171,7 @@ void kernel_gemm_tv(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha,
 
             // Vectorization
             #pragma omp simd
-            for(j = jj; j < jj + TILE_N; j++){
+            for(j = jj; j < jj + TILE_SIZE; j++){
               // Load a chunk of B
               float load_B = B[k*NJ+j];
               // Unrolling A_updated * B
@@ -191,56 +193,70 @@ void kernel_gemm_tv(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha,
   }
 }
 
-/* Main computational kernel: with tiling, simd, and parallelization optimizations. */
+/* Main computational kernel: with tiling, simd, parallelization, and intrinsic optimizations. */
 static
+__attribute__((target("avx2")))
 void kernel_gemm_tvp(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
 {
   int i, j, k, ii, jj, kk;
+  omp_set_num_threads(NUM_THREADS);
 
-  // Performance for C *= beta is negligible
-  for(i = 0; i < NI; i++){
-    for(j = 0; j < NJ; j++){
-      C[i*NJ+j] *= beta;
+  #pragma omp parallel default(none) shared(A,B,C,alpha,beta) private(i,j,k,ii,jj,kk)
+  {
+    // C *= beta
+    #pragma omp for schedule(static)
+    for(i = 0; i < NI; i++){
+      float *row_C = &C[i*NJ];
+      #pragma omp simd
+      for(j = 0; j < NJ; j++) row_C[j] *= beta;
     }
-  }
-  
-  // Parallel for on outer loop
-  #pragma omp parallel for private (i,j,k,ii,jj,kk)
-  // Tiling
-  for (ii =  0 ; ii < NI; ii += TILE_N){
-    for (kk = 0; kk < NK; kk += TILE_N){
-      for(jj = 0; jj < NJ; jj += TILE_N){
-      
-        // Inside tiles
-        for (i = ii; i < ii + TILE_N; i+= Unroll){
-          for (k = kk; k < kk + TILE_N; k++){
 
-            // Unrolling a * A
-            float A0 = alpha * A[(i + 0) * NK + k];
-            float A1 = alpha * A[(i + 1) * NK + k];
-            float A2 = alpha * A[(i + 2) * NK + k];
-            float A3 = alpha * A[(i + 3) * NK + k];
-            float A4 = alpha * A[(i + 4) * NK + k]; 
-            float A5 = alpha * A[(i + 5) * NK + k];
-            float A6 = alpha * A[(i + 6) * NK + k];
-            float A7 = alpha * A[(i + 7) * NK + k];
+    // Tiling and parallelization
+    #pragma omp for schedule(static)
+    for (ii = 0; ii < NI; ii += TILE_SIZE) {
+      for (kk = 0; kk < NK; kk += TILE_SIZE) {
+        for (jj = 0; jj < NJ; jj += TILE_SIZE) {
 
-            // Vectorization
-            #pragma omp simd
-            for(j = jj; j < jj + TILE_N; j++){
-              // Load a chunk of B
-              float load_B = B[k*NJ+j];
-              // Unrolling A_updated * B
-              C[(i + 0) * NJ + j] += A0 * load_B;
-              C[(i + 1) * NJ + j] += A1 * load_B;
-              C[(i + 2) * NJ + j] += A2 * load_B;
-              C[(i + 3) * NJ + j] += A3 * load_B;
-              C[(i + 4) * NJ + j] += A4 * load_B;
-              C[(i + 5) * NJ + j] += A5 * load_B;
-              C[(i + 6) * NJ + j] += A6 * load_B;
-              C[(i + 7) * NJ + j] += A7 * load_B;
+          // Inside tiles
+          for (i = ii; i < ii + TILE_SIZE; i += 4) { 
 
+            // Load C
+            float *C0 = &C[(i + 0) * NJ];
+            float *C1 = &C[(i + 1) * NJ];
+            float *C2 = &C[(i + 2) * NJ];
+            float *C3 = &C[(i + 3) * NJ];
+            
+            for (k = kk; k < kk + TILE_SIZE; k++) {
 
+              // Load alpha * A
+              __m256 va0 = _mm256_set1_ps(alpha * A[(i + 0) * NK + k]);
+              __m256 va1 = _mm256_set1_ps(alpha * A[(i + 1) * NK + k]);
+              __m256 va2 = _mm256_set1_ps(alpha * A[(i + 2) * NK + k]);
+              __m256 va3 = _mm256_set1_ps(alpha * A[(i + 3) * NK + k]);
+
+              // Unrolling
+              for (j = jj; j < jj + TILE_SIZE; j += 8) {
+                  // Load row of B
+                  __m256 vb = _mm256_loadu_ps(&B[k * NJ + j]);
+
+                  // Load current C values
+                  __m256 vc0 = _mm256_loadu_ps(&C[(i + 0) * NJ + j]);
+                  __m256 vc1 = _mm256_loadu_ps(&C[(i + 1) * NJ + j]);
+                  __m256 vc2 = _mm256_loadu_ps(&C[(i + 2) * NJ + j]);
+                  __m256 vc3 = _mm256_loadu_ps(&C[(i + 3) * NJ + j]);
+
+                  // C += A * B
+                  vc0 = _mm256_add_ps(vc0, _mm256_mul_ps(va0, vb));
+                  vc1 = _mm256_add_ps(vc1, _mm256_mul_ps(va1, vb));
+                  vc2 = _mm256_add_ps(vc2, _mm256_mul_ps(va2, vb));
+                  vc3 = _mm256_add_ps(vc3, _mm256_mul_ps(va3, vb));
+
+                  // Store results back
+                  _mm256_storeu_ps(&C[(i + 0) * NJ + j], vc0);
+                  _mm256_storeu_ps(&C[(i + 1) * NJ + j], vc1);
+                  _mm256_storeu_ps(&C[(i + 2) * NJ + j], vc2);
+                  _mm256_storeu_ps(&C[(i + 3) * NJ + j], vc3);
+              }
             }
           }
         }
