@@ -70,6 +70,8 @@ void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, fl
 //A is NIxNK
 //B is NKxNJ
 //C is NIxNJ
+omp_set_num_threads(NUM_THREADS);
+  #pragma omp parallel for
   for (i = 0; i < NI; i++) {
     for (j = 0; j < NJ; j++) {
       C[i*NJ+j] *= beta;
