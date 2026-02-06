@@ -14,6 +14,10 @@
 #define Unroll 8
 #define NUM_THREADS 20
 
+#define BATCHSIZE 16
+
+
+
 /* Array initialization. */
 static
 void init_array(float C[NI*NJ], float A[NI*NK], float B[NK*NJ])
@@ -60,8 +64,31 @@ void print_array_sum(float C[NI*NJ])
   printf("sum of C array = %f\n", sum);
 }
 
-// Main computation kernel
+void load(float* buffer, float* loadAddress){
+  #pragma HLS pipeline II=1
+  for (int i = 0; i<BATCHSIZE; i++){
+    buffer[i] = loadAddress[i]; 
+  }
+  return;
+}
 
+void compute_beta(float* buffer, float beta){
+  #pragma HLS pipeline II=1
+  for (int i =0; i< BATCHSIZE; i++){
+    buffer[i] *= beta;
+  }
+  return;
+}
+
+void store(float* destination, float* buffer){
+  #pragma HLS pipeline II=1
+  for (int i =0; i<BATCHSIZE; i++){
+    destination[i] = buffer[i];
+  }
+  return;
+}
+
+// Main computation kernel
 static
 __attribute__((target("avx2")))
 void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, float beta)
@@ -73,30 +100,34 @@ void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, fl
   const int bitshift_NJ = log2(NI);
   const int bitshift_NK = log2(NI);
 
-  const int TILESIZE_I = 256;
-  const int TILESIZE_J = 512;
+  const int TILESIZE_I = 64;
+  const int TILESIZE_J = 64;
   const int TILESIZE_K = 64;
 
   __m256 betaV = _mm256_set1_ps(beta);
 
-  #pragma omp parallel default(none) shared(A,B,C,alpha,beta, betaV) private(i,j,k,ii,jj,kk)
+  #pragma omp parallel default(none) shared(A,B,C,alpha,beta, betaV) private(i,j,k,ii,jj,kk) num_threads(20)
   {
     // C *= beta
     #pragma omp for schedule(static)
     for (int ii = 0; ii < NI; ii += TILESIZE_I) {
-        int IImax = (ii + TILESIZE_I < NI ? ii + TILESIZE_I : NI);
         for (int jj = 0; jj < NJ; jj += TILESIZE_J) {
-            int JJmax = (jj + TILESIZE_J < NJ ? jj + TILESIZE_J : NJ);
+            for (int i = ii; i < ii + TILESIZE_I; i++) {
+                // float *row_C = &C[i << bitshift_NJ];
 
-            for (int i = ii; i < IImax; i++) {
-                float *row_C = &C[i << bitshift_NJ];
+                // #pragma omp simd
+                for (int j = jj; j < jj + TILESIZE_J; j+= 16) {
+                   //initializing the buffer:
+                    float buffer[BATCHSIZE];
+                    //LOAD SECTION
+                    load(buffer, &C[(i << bitshift_NJ)+j]);
+                    
+                    //COMPUTE SECTION
+                    compute_beta(buffer, beta);
 
-                #pragma omp simd
-                for (int j = jj; j < JJmax; j+= 8) {
-                    // row_C[j] *= beta;
-                    __m256 cV = _mm256_loadu_ps(&row_C[j]); 
-                    cV = _mm256_mul_ps(cV, betaV); 
-                    _mm256_storeu_ps(&row_C[j], cV);
+                    //STORE SECTION
+                    store(&C[(i << bitshift_NJ)+j], buffer);
+
                 }
             }
         }
@@ -156,6 +187,7 @@ void kernel_gemm(float C[NI*NJ], float A[NI*NK], float B[NK*NJ], float alpha, fl
     }
   }
 }
+
 
 int main(int argc, char** argv)
 {
